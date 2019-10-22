@@ -181,7 +181,7 @@ list_repo() {
     echo "URL: [$URL_GIT_USERS] [$URL_GIT_PROJECTS] [$BASE_URL]"
 
     # fetch repo list
-    curl -o $TMP_REPO_FILE  -k --request GET --header "PRIVATE-TOKEN: $TOKEN" "$URL_GIT_PROJECTS"
+    curl -o $TMP_REPO_FILE  -k --request GET --header "PRIVATE-TOKEN: $TOKEN" "$URL_GIT_PROJECTS" &> /dev/null
 
     if [ $? -ne 0 ]; then
         fatal "can't fetch gitlab repository list" 6
