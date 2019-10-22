@@ -1,0 +1,422 @@
+#! /bin/bash
+
+# fetch script path for import
+# https://stackoverflow.com/questions/4774054/reliable-way-for-a-bash-script-to-get-the-full-path-to-itself
+SCRIPTPATH="$( cd "$(dirname "$0")" ; pwd -P )"
+
+# try to globally load sh_lib
+source sh_lib
+if [ $? -ne 0 ]; then
+    # try to load them from where the script is
+    source $SCRIPTPATH/sh_lib/sh_lib
+fi
+
+#
+# vars used across the project
+#
+
+# json file path
+CONFIG_PATH="$HOME/.config/ftdb"
+
+REPO_FILE="$CONFIG_PATH/repo.json"
+USER_FILE="$CONFIG_PATH/user.json"
+URL_FILE="$CONFIG_PATH/.base_url"
+TOKEN_FILE="$CONFIG_PATH/.git_token"
+
+# tmp output
+TMP_REPO_FILE=/tmp/repo.json
+TMP_USER_FILE=/tmp/user.json
+TMP_OUTPUT=/tmp/ret.json
+
+# URL
+BASE_URL=`cat $URL_FILE`
+URL_GIT_PROJECTS="$BASE_URL/api/v4/projects"
+URL_GIT_USERS="$BASE_URL/api/v4/users"
+
+# target repo ID
+PROJECT_NAME=""
+PROJECT_ID=
+
+# target user assigned
+USER_ASSIGNEE=""
+USER_ID=
+
+# target issue data
+ISSUE_NAME=""
+ISSUE_DESCRIPTION=""
+ISSUE_ID=
+
+# branch name
+BRANCH_NAME=""
+
+# user git access token
+TOKEN=""
+
+# cli flag
+L_USER=0
+L_PROJECT=0
+
+#
+# Usage
+#
+USAGE="usage:
+
+    $0 -n 'issue name' -b 'branch name' -p 'project name' -a 'assignee' [ -d 'issue description' ]  [ -t 'git token' | -T '/token/path' ] [ -u 'base url' | -B '/base/url/path' ]   [ -U|-P ] [ -l (0..3)]
+
+    Required params :
+        -n : issue name
+        -b : branch name (format: master-[issue id]-[cli val])
+        -p : project name
+        -a : user assigned to the issue and MR
+
+    Optional params :
+        -d : issue description
+        -t : git token
+        -T : git token file path
+             Default : [$TOKEN_FILE]
+
+        -u : base url to query the git API
+        -B : base url file path
+             Default : [$URL_FILE]
+
+        -U : force re-create and display the user list
+        -P : force re-create and display the project list
+
+        -l : log level (0=error,1=info,2=warn,3=debug).
+             Default : [$LEVEL]
+
+Create an issue, then push the work to a automatic branch, create an MR from the branch which reference the newly created issue.
+
+Return value :
+
+       -2 : no git url provided
+       -1 : no git token provided
+       0  : 
+       1  : wrong cli param
+       2  : not in a git repository
+       3  : missing curl binary
+       4  : error while creating the issue
+       5  : error while creating the merge request
+       6  : can't fetch the project list
+       7  : can't fetch the users list
+       8  : can't fetch project ID
+       9  : can't fetch git user ID
+       10 : can't fetch the created issue ID
+
+'
+"
+
+debug_info() {
+    debug "
+    issue name       : $ISSUE_NAME
+    project name     : $PROJECT_NAME
+    issue descrition : $ISSUE_DESCRIPTION
+    issue assignee   : $USER_ASSIGNEE
+    git token        : $TOKEN
+    git branch       : $BRANCH_NAME
+    log level        : $LEVEL
+    url file         : $URL_FILE
+    token file       : $TOKEN_FILE"
+
+}
+
+define_token() {
+    if [ -z $TOKEN ]; then
+        TOKEN=`cat $TOKEN_FILE`
+    fi
+
+    if [ -z $TOKEN ]; then
+        fatal "no git token provided" -1
+    fi
+}
+
+define_url() {
+    if [ -z $BASE_URL ]; then
+        BASE_URL=`cat $URL_FILE`
+    fi
+
+    if [ -z $BASE_URL ]; then
+        fatal "no base url provided" -2
+    fi
+}
+
+check_params() {
+    # check params
+    if [[ -z $ISSUE_NAME || \
+              -z $PROJECT_NAME || \
+              -z $USER_ASSIGNEE || \
+              ( -z $TOKEN && ! -f $TOKEN_FILE) || \
+              -z $BASE_URL || \
+              -z $PROJECT_NAME ]]; then
+        usage "$USAGE"
+        exit 1
+    fi
+}
+
+check_utils() {
+    exit_if_not_installed curl
+    exit_if_not_installed jq
+    exit_if_not_installed git
+}
+
+check_in_git() {
+    git status &> /dev/null
+    if [ $? -ne 0 ]; then
+        fatal "not in a git repository" 2
+    fi
+}
+
+# create a json file that hold project + project id
+# param 0 : git token
+list_repo() {
+
+    # check if file exist
+    if [ -f $REPO_FILE ]; then
+        info "projects file already exist"
+        return 0
+    fi
+
+    mkdir -p $CONFIG_PATH
+
+    echo "URL: [$URL_GIT_USERS] [$URL_GIT_PROJECTS] [$BASE_URL]"
+
+    # fetch repo list
+    curl -o $TMP_REPO_FILE  -k --request GET --header "PRIVATE-TOKEN: $TOKEN" "$URL_GIT_PROJECTS"
+
+    if [ $? -ne 0 ]; then
+        fatal "can't fetch gitlab repository list" 6
+    fi
+
+    # parse repo list
+    cat $TMP_REPO_FILE | jq '.[]' | jq '{name: .name, id: .id}' > $REPO_FILE
+
+    debug "Repo list : `cat $REPO_FILE`"
+    if [ ! -s $REPO_FILE ]; then
+        rm $REPO_FILE
+        fatal "file empty - pls double check" 6
+    fi
+}
+
+list_user() {
+
+    # check if file exist
+    if [ -f $USER_FILE ]; then
+        info "users file already exist"
+        return 0
+    fi
+
+    # fetch repo list
+    curl -o $TMP_USER_FILE  -k --request GET --header "PRIVATE-TOKEN: $TOKEN" "$URL_GIT_USERS" &> /dev/null
+
+    if [ $? -ne 0 ]; then
+        fatal "can't fetch gitlab user list" 7
+    fi
+
+    # parse repo list
+    cat $TMP_USER_FILE | jq '.[]' | jq '{name: .name, username: .username, id: .id}' > $USER_FILE
+
+    debug "user list : `cat $USER_FILE`"
+    if [ ! -s $USER_FILE ]; then
+        rm $USER_FILE
+        fatal "file empty - pls double check" 7
+    fi
+
+    # TODO: should create an user name:id file
+    return 0
+}
+
+fetch_repo_id() {
+    local name=$1
+
+    id=`cat $REPO_FILE  | jq ". | select(.name == \"$name\") | .id"`
+
+    return $id
+}
+
+fetch_user_id() {
+    local name=$1
+
+    id=`cat $USER_FILE  | jq ". | select(.username == \"$name\") | .id"`
+
+    return $id
+}
+
+create_issue() {
+
+    # TODO: add assignee
+
+    local token=$1
+    local id=$2
+    local user_id=$3
+    local issue_url="$BASE_URL/$id/issues"
+
+    curl -o $TMP_OUTPUT \
+         --request POST \
+         --header "PRIVATE-TOKEN: $token" \
+         --data-urlencode "title=$ISSUE_NAME" \
+         --data-urlencode "description=$ISSUE_DESCRIPTION" \
+         --data-urlencode "assignee_ids=$user_id" \
+         "$issue_url" &> /dev/null
+
+    if [ $? -ne 0 ]; then
+        fatal "while creating the issue" 4
+    fi
+
+    issue_id=`cat $TMP_OUTPUT | jq '.iid'`
+
+    return $issue_id
+}
+
+create_mr() {
+
+    local token=$1
+    local project_id=$2
+    local user_id=$3
+    local issue_id=$4
+
+    local mr_url="$BASE_URL/$project_id/merge_requests"
+    local name="Resolve $ISSUE_NAME"
+
+    curl -o $TMP_OUTPUT \
+         --request POST \
+         --header "PRIVATE-TOKEN: $token" \
+         --data-urlencode "id=$project_id" \
+         --data-urlencode "source_branch=$BRANCH_NAME" \
+         --data-urlencode "target_branch=master" \
+         --data-urlencode "title=$name" \
+         --data-urlencode "description=Implement #$issue_id" \
+         --data-urlencode "assignee_ids=$user_id" \
+         "$mr_url" &> /dev/null
+
+    if [ $? -ne 0 ]; then
+        fatal "while creating the merge request" 5
+    fi
+
+    debug "merge request (TODO) created for issue #$issue_id"
+}
+
+push() {
+
+    local id=$1
+    local name=$2
+    BRANCH_NAME="master-$id-$name"
+
+    debug "branch name : $BRANCH_NAME"
+
+    git checkout -b $BRANCH_NAME &> /dev/null
+    git add -p .
+
+    echo -n "Force add the repo state ? "
+    read resp
+    if [[ "$resp" == "y" ||  "$resp" == "Y" ]]; then
+        debug "force adding the repo state"
+        git add .
+    fi
+
+    git commit -m "fix for issue #$id"
+    # TODO: may have to load sub shell conf
+    git push origin $BRANCH_NAME
+
+    debug "work pushed to the target branch $BRANCH_NAME"
+}
+
+while getopts "UPhn:d:a:t:T:b:p:u:B:l:" o; do
+    case "${o}" in
+        a)
+            USER_ASSIGNEE=${OPTARG}
+            ;;
+        d)
+            ISSUE_DESCRIPTION=${OPTARG}
+            ;;
+        b)
+            BRANCH_NAME=${OPTARG}
+            ;;
+        n)
+            ISSUE_NAME=${OPTARG}
+            ;;
+        t)
+            TOKEN=${OPTARG}
+            ;;
+        T)
+            TOKEN_FILE=${OPTARG}
+            ;;
+        u)
+            BASE_URL=${OPTARG}
+            ;;
+        B)
+            URL_FILE=${OPTARG}
+            ;;
+        p)
+            PROJECT_NAME=${OPTARG}
+            ;;
+        l)
+            LEVEL=${OPTARG}
+            ;;
+        h)
+            usage "$USAGE"
+            exit 0
+            ;;
+        U)
+            L_USER=1
+            ;;
+        P)
+            L_PROJECT=1
+            ;;
+        *)
+	          usage "$USAGE"
+	          exit 1
+	          ;;
+    esac
+done
+
+# define token value
+define_token
+
+# TODO: define URL
+define_url
+
+# list user or project if required
+if [ $L_PROJECT -eq 1 ]; then
+    rm -f $REPO_FILE
+    list_repo
+    exit 0
+elif [ $L_USER -eq 1  ]; then
+    rm -f $USER_FILE
+    list_user
+    exit 0
+fi
+
+# check params
+debug_info && check_params && check_utils
+
+# ensure in a git repo
+check_in_git
+
+# list repo
+list_repo && list_user
+
+fetch_repo_id "$PROJECT_NAME"
+PROJECT_ID=$?
+debug "'$PROJECT_NAME' id: $PROJECT_ID"
+if [ $PROJECT_ID == "0" ]; then
+    fatal "can't find a project name $PROJECT_NAME, pls double check (case sensitive)" 8
+fi
+
+fetch_user_id "$USER_ASSIGNEE"
+USER_ID=$?
+debug "'$USER_ASSIGNEE' id: $USER_ID"
+if [ $USER_ID == "0" ]; then
+    fatal "can't find a user for $USER_ASSIGNEE, pls double check (case sensitive)" 9
+fi
+
+create_issue "$token" $PROJECT_ID $USER_ID
+ISSUE_ID=$?
+debug "issue id : $ISSUE_ID"
+if [ $ISSUE_ID == "0" ]; then
+    fatal "can't create an issue for the git project $PROJECT_ID" 9
+fi
+
+# eval `ssh-agent`
+
+push $ISSUE_ID "$BRANCH_NAME"
+create_mr "$token" $PROJECT_ID $USER_ID $ISSUE_ID  $BRANCH_NAME
