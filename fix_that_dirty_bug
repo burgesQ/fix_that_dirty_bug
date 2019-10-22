@@ -244,15 +244,15 @@ fetch_user_id() {
 create_issue() {
 
     # TODO: add assignee
+    local id=$1
+    local user_id=$2
+    local issue_url="$URL_GIT_PROJECTS/$id/issues"
 
-    local token=$1
-    local id=$2
-    local user_id=$3
-    local issue_url="$BASE_URL/$id/issues"
+    debug "issue url : $issue_url"
 
     curl -o $TMP_OUTPUT \
          --request POST \
-         --header "PRIVATE-TOKEN: $token" \
+         --header "PRIVATE-TOKEN: $TOKEN" \
          --data-urlencode "title=$ISSUE_NAME" \
          --data-urlencode "description=$ISSUE_DESCRIPTION" \
          --data-urlencode "assignee_ids=$user_id" \
@@ -267,39 +267,10 @@ create_issue() {
     return $issue_id
 }
 
-create_mr() {
-
-    local token=$1
-    local project_id=$2
-    local user_id=$3
-    local issue_id=$4
-
-    local mr_url="$BASE_URL/$project_id/merge_requests"
-    local name="Resolve $ISSUE_NAME"
-
-    curl -o $TMP_OUTPUT \
-         --request POST \
-         --header "PRIVATE-TOKEN: $token" \
-         --data-urlencode "id=$project_id" \
-         --data-urlencode "source_branch=$BRANCH_NAME" \
-         --data-urlencode "target_branch=master" \
-         --data-urlencode "title=$name" \
-         --data-urlencode "description=Implement #$issue_id" \
-         --data-urlencode "assignee_ids=$user_id" \
-         "$mr_url" &> /dev/null
-
-    if [ $? -ne 0 ]; then
-        fatal "while creating the merge request" 5
-    fi
-
-    debug "merge request (TODO) created for issue #$issue_id"
-}
-
 push() {
 
     local id=$1
-    local name=$2
-    BRANCH_NAME="master-$id-$name"
+    BRANCH_NAME="master-$id-$BRANCH_NAME"
 
     debug "branch name : $BRANCH_NAME"
 
@@ -318,6 +289,35 @@ push() {
     git push origin $BRANCH_NAME
 
     debug "work pushed to the target branch $BRANCH_NAME"
+}
+
+create_mr() {
+
+    local project_id=$1
+    local user_id=$2
+    local issue_id=$3
+
+    local mr_url="$URL_GIT_PROJECTS/$project_id/merge_requests"
+    local name="Resolve $ISSUE_NAME"
+
+    debug "mr url ($name) : $mr_url"
+
+    curl -o $TMP_OUTPUT \
+         --request POST \
+         --header "PRIVATE-TOKEN: $TOKEN" \
+         --data-urlencode "id=$project_id" \
+         --data-urlencode "source_branch=$BRANCH_NAME" \
+         --data-urlencode "target_branch=master" \
+         --data-urlencode "title=$name" \
+         --data-urlencode "description=Implement #$issue_id" \
+         --data-urlencode "assignee_ids=$user_id" \
+         "$mr_url" &> /dev/null
+
+    if [ $? -ne 0 ]; then
+        fatal "while creating the merge request" 5
+    fi
+
+    debug "merge request (TODO) created for issue #$issue_id"
 }
 
 while getopts "UPhn:d:a:t:T:b:p:u:B:l:" o; do
@@ -409,7 +409,7 @@ if [ $USER_ID == "0" ]; then
     fatal "can't find a user for $USER_ASSIGNEE, pls double check (case sensitive)" 9
 fi
 
-create_issue "$token" $PROJECT_ID $USER_ID
+create_issue $PROJECT_ID $USER_ID
 ISSUE_ID=$?
 debug "issue id : $ISSUE_ID"
 if [ $ISSUE_ID == "0" ]; then
@@ -418,5 +418,5 @@ fi
 
 # eval `ssh-agent`
 
-push $ISSUE_ID "$BRANCH_NAME"
-create_mr "$token" $PROJECT_ID $USER_ID $ISSUE_ID  $BRANCH_NAME
+push $ISSUE_ID
+create_mr $PROJECT_ID $USER_ID $ISSUE_ID
